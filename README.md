@@ -170,3 +170,10 @@ AI: [调用 transform_image] 🎨 新场景已生成！[显示图片]
 ## License
 
 MIT
+
+---
+
+<p align="center">
+  <sub>Built with 🌀 <a href="https://github.com/anthropics/claude-code">Claude Code</a></sub>
+</p>
+
