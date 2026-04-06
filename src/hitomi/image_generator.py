@@ -7,13 +7,14 @@ import os
 import base64
 import httpx
 import logging
+import asyncio
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 
 class ImageGenerator:
-    """Engine for generating images using Gemini or Qwen."""
+    """Engine for generating images using Gemini or Qwen Wanx."""
 
     def __init__(
         self,
@@ -27,99 +28,144 @@ class ImageGenerator:
         if self.provider == "qwen":
             self.api_key = api_key or os.getenv("QWEN_API_KEY") or os.getenv("DASHSCOPE_API_KEY")
             if not self.api_key:
-                # Fallback to Gemini if no Qwen key
                 logger.warning("No QWEN_API_KEY found, trying Gemini...")
                 self.provider = "gemini"
             else:
-                # Qwen image models: qwen-image-max, qwen-image-plus
-                self.model = model or os.getenv("QWEN_IMAGE_MODEL", "qwen-image-max")
-                # Use chat/completions API (like GPT-4o)
-                self.base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
-                logger.info(f"ImageGenerator initialized with Qwen model: {self.model}")
+                self.model = model or os.getenv("QWEN_IMAGE_MODEL", "wanx-v1")
+                self.base_url = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text2image/image-synthesis"
+                self.task_url = "https://dashscope.aliyuncs.com/api/v1/tasks"
+                logger.info(f"ImageGenerator initialized with Qwen Wanx model: {self.model}")
                 return
 
         if self.provider == "gemini":
             self.api_key = api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
             if not self.api_key:
                 raise ValueError("GEMINI_API_KEY or QWEN_API_KEY is required for image generation")
-            # Use gemini-3-pro-image-preview (Nano Banana Pro) for best quality
             self.model = model or os.getenv("GEMINI_IMAGE_MODEL", "gemini-3-pro-image-preview")
             self.base_url = "https://generativelanguage.googleapis.com/v1beta"
             logger.info(f"ImageGenerator initialized with Gemini model: {self.model}")
+
+    def _get_wanx_size(self, aspect_ratio: str) -> str:
+        """Convert aspect ratio to Wanx supported size."""
+        size_map = {
+            "1:1": "1024*1024",
+            "16:9": "1280*720",
+            "9:16": "720*1280",
+            "4:3": "1024*768",
+            "3:4": "768*1024",
+        }
+        return size_map.get(aspect_ratio, "1024*1024")
 
     async def generate_image(
         self,
         prompt: str,
         aspect_ratio: str = "1:1",
     ) -> dict:
-        """Generate an image from a text prompt.
-
-        Args:
-            prompt: Text description of the image to generate
-            aspect_ratio: Aspect ratio (1:1, 16:9, 9:16, 4:3, 3:4)
-
-        Returns:
-            Dict with 'image_base64' and 'mime_type'
-        """
+        """Generate an image from a text prompt."""
         if self.provider == "qwen":
             return await self._generate_with_qwen(prompt, aspect_ratio)
         else:
             return await self._generate_with_gemini(prompt, aspect_ratio)
 
     async def _generate_with_qwen(self, prompt: str, aspect_ratio: str) -> dict:
-        """Generate image using Qwen multimodal model via chat/completions."""
+        """Generate image using Qwen Wanx via async task API."""
+        size = self._get_wanx_size(aspect_ratio)
+
+        # Step 1: Create task
         payload = {
             "model": self.model,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": f"请根据以下描述生成一张图片：\n\n{prompt}\n\n要求：生成高质量的图片，符合描述的内容和风格。"
-                }
-            ],
+            "input": {
+                "prompt": prompt
+            },
+            "parameters": {
+                "style": "<auto>",
+                "size": size,
+                "n": 1
+            }
         }
 
-        async with httpx.AsyncClient(timeout=180.0) as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(
                 self.base_url,
                 headers={
                     "Authorization": f"Bearer {self.api_key}",
                     "Content-Type": "application/json",
+                    "X-DashScope-Async": "enable",
                 },
                 json=payload,
             )
 
-            response_text = response.text
-            logger.info(f"Qwen response status: {response.status_code}")
-            logger.info(f"Qwen response: {response_text[:500]}")
-
             if response.status_code != 200:
-                logger.error(f"Qwen API error: {response_text}")
-                raise Exception(f"Qwen API error ({response.status_code}): {response_text}")
+                raise Exception(f"Wanx create task error ({response.status_code}): {response.text}")
 
             result = response.json()
+            task_id = result.get("output", {}).get("task_id")
+            if not task_id:
+                raise Exception(f"No task_id in response: {result}")
 
-            # Check if model returned image content
-            choices = result.get("choices", [])
-            if choices:
-                message = choices[0].get("message", {})
-                content = message.get("content", "")
+            logger.info(f"Wanx task created: {task_id}")
 
-                # If content is a list (multimodal response)
-                if isinstance(content, list):
-                    for item in content:
-                        if isinstance(item, dict) and item.get("type") == "image":
-                            image_data = item.get("image", "")
-                            if image_data:
-                                return {
-                                    "image_base64": image_data,
-                                    "mime_type": "image/png",
-                                    "text": "",
-                                }
+        # Step 2: Poll for result
+        task_url = f"{self.task_url}/{task_id}"
+        max_attempts = 60
+        poll_interval = 3
 
-                # Model doesn't support image generation, return error with helpful message
-                raise Exception(f"该模型不支持图片生成。模型返回: {str(content)[:200]}")
+        for attempt in range(max_attempts):
+            await asyncio.sleep(poll_interval)
 
-            raise Exception(f"API响应格式错误: {result}")
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.get(
+                    task_url,
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                    },
+                )
+
+                if response.status_code != 200:
+                    raise Exception(f"Wanx poll error ({response.status_code}): {response.text}")
+
+                result = response.json()
+                status = result.get("output", {}).get("task_status")
+                logger.info(f"Wanx task {task_id} status: {status} (attempt {attempt + 1})")
+
+                if status == "SUCCEEDED":
+                    results = result.get("output", {}).get("results", [])
+                    if not results or "url" not in results[0]:
+                        raise Exception(f"No image URL in results: {result}")
+
+                    image_url = results[0]["url"]
+                    logger.info(f"Wanx image generated: {image_url}")
+
+                    # Step 3: Download image and convert to base64
+                    async with httpx.AsyncClient(timeout=60.0) as dl_client:
+                        img_response = await dl_client.get(image_url)
+                        if img_response.status_code != 200:
+                            raise Exception(f"Failed to download image: {img_response.status_code}")
+
+                        image_base64 = base64.b64encode(img_response.content).decode("utf-8")
+
+                        # Detect mime type from URL
+                        mime_type = "image/png"
+                        if image_url.lower().endswith(".jpg") or image_url.lower().endswith(".jpeg"):
+                            mime_type = "image/jpeg"
+
+                        return {
+                            "image_base64": image_base64,
+                            "mime_type": mime_type,
+                            "text": "",
+                        }
+
+                elif status == "FAILED":
+                    error_code = result.get("output", {}).get("code", "")
+                    error_msg = result.get("output", {}).get("message", "")
+                    raise Exception(f"Wanx task failed: {error_code} - {error_msg}")
+
+                elif status in ("PENDING", "RUNNING"):
+                    continue
+                else:
+                    raise Exception(f"Unknown task status: {status}")
+
+        raise Exception(f"Wanx task timed out after {max_attempts * poll_interval} seconds")
 
     async def _generate_with_gemini(self, prompt: str, aspect_ratio: str) -> dict:
         """Generate image using Gemini API."""
@@ -156,7 +202,6 @@ class ImageGenerator:
 
             result = response.json()
 
-            # Extract image from response
             try:
                 candidates = result.get("candidates", [])
                 if not candidates:
@@ -192,17 +237,7 @@ class ImageGenerator:
         scene_prompt: str,
         style_hints: Optional[str] = None,
     ) -> dict:
-        """Generate an image based on a character/reference description and a new scene.
-
-        Args:
-            reference_description: Description of the character/reference (from vision analysis)
-            scene_prompt: The new scene to generate
-            style_hints: Optional style hints (art style, mood, etc.)
-
-        Returns:
-            Dict with 'image_base64' and 'mime_type'
-        """
-        # Combine reference description with scene prompt
+        """Generate an image based on a character/reference description and a new scene."""
         full_prompt = f"""Based on this character description:
 {reference_description}
 
