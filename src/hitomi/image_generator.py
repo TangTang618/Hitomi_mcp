@@ -28,9 +28,11 @@ class ImageGenerator:
                 self.provider = "gemini"
             else:
                 self.model = model or os.getenv("QWEN_IMAGE_MODEL", "wanx-v1")
-                self.base_url = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text2image/image-synthesis"
-                self.task_url = "https://dashscope.aliyuncs.com/api/v1/tasks"
+                dashscope_base = os.getenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com")
+                self.base_url = f"{dashscope_base}/api/v1/services/aigc/text2image/image-synthesis"
+                self.task_url = f"{dashscope_base}/api/v1/tasks"
                 logger.info(f"ImageGenerator initialized with Qwen Wanx model: {self.model}")
+                logger.info(f"DashScope base URL: {dashscope_base}")
                 return
 
         if self.provider == "gemini":
@@ -61,6 +63,9 @@ class ImageGenerator:
             "parameters": {"style": "<auto>", "size": size, "n": 1}
         }
 
+        logger.info(f"Submitting to: {self.base_url}")
+        logger.info(f"API key starts with: {self.api_key[:8]}...")
+
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(
                 self.base_url,
@@ -71,6 +76,9 @@ class ImageGenerator:
                 },
                 json=payload,
             )
+
+            logger.info(f"Submit response status: {response.status_code}")
+            logger.info(f"Submit response body: {response.text[:500]}")
 
             if response.status_code != 200:
                 raise Exception(f"Wanx error ({response.status_code}): {response.text}")
@@ -85,17 +93,23 @@ class ImageGenerator:
 
     async def check_task(self, task_id: str) -> dict:
         """Check status of a wanx task."""
+        logger.info(f"Checking task: {self.task_url}/{task_id}")
+
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.get(
                 f"{self.task_url}/{task_id}",
                 headers={"Authorization": f"Bearer {self.api_key}"},
             )
 
+            logger.info(f"Check response status: {response.status_code}")
+            logger.info(f"Check response body: {response.text[:500]}")
+
             if response.status_code != 200:
                 raise Exception(f"Poll error ({response.status_code}): {response.text}")
 
             result = response.json()
             status = result.get("output", {}).get("task_status")
+            logger.info(f"Task status: {status}")
 
             if status == "SUCCEEDED":
                 results = result.get("output", {}).get("results", [])
@@ -107,7 +121,7 @@ class ImageGenerator:
                 return {"status": status}
 
     async def generate_image(self, prompt: str, aspect_ratio: str = "1:1") -> dict:
-        """Full generate: submit + poll until done. For Gemini or sync use."""
+        """Full generate: submit + poll until done."""
         if self.provider == "gemini":
             return await self._generate_with_gemini(prompt, aspect_ratio)
 
