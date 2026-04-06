@@ -34,7 +34,7 @@ class ImageGenerator:
                 # Qwen image models: qwen-image-max, qwen-image-plus
                 self.model = model or os.getenv("QWEN_IMAGE_MODEL", "qwen-image-max")
                 # Use chat/completions API (like GPT-4o)
-                self.base_url = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions"
+                self.base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
                 logger.info(f"ImageGenerator initialized with Qwen model: {self.model}")
                 return
 
